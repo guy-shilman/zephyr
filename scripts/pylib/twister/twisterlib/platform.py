@@ -6,6 +6,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+import copy
 import logging
 import os
 import shutil
@@ -60,6 +61,7 @@ class Platform:
 
         """
 
+        self.board = None
         self.name = ""
         self.aliases = []
         self.normalized_name = ""
@@ -103,6 +105,7 @@ class Platform:
         data: the default data from the twister.yaml file for the board
         variant_data: the target-specific data to replace the default data
         """
+        self.board = board
         self.name = target
         self.aliases = aliases
 
@@ -204,6 +207,37 @@ class Platform:
 
     def __repr__(self):
         return f"<{self.name} on {self.arch}>"
+
+
+def create_custom_revision_platform(template, target, aliases):
+    """Create one explicitly requested revision of a custom-revision board.
+
+    Do not try to enumerate all revisions of a custom board. CMake will
+    validate BOARD_REVISION and resolve ACTIVE_BOARD_REVISION at build time.
+    """
+    board = template.board
+    metadata = board.dir / "twister.yaml"
+    if metadata.is_file():
+        data = scl.yaml_load_verify(metadata, Platform.platform_schema)
+        variant_data = {}
+        for board_dir in board.directories:
+            path = board_dir / "twister.yaml"
+            if path.is_file():
+                content = scl.yaml_load_verify(path, Platform.platform_schema)
+                variant_data = content.get("variants", {}).get(target, variant_data)
+
+        platform = Platform()
+        platform.load(board, target, aliases, data, variant_data)
+    else:
+        # Legacy board metadata: retain the base platform's properties.
+        platform = copy.deepcopy(template)
+        platform.name = target
+        platform.aliases = aliases
+        platform.normalized_name = target.replace("/", "_")
+
+    # An explicitly named revision must not expand the default CI matrix.
+    platform.default = False
+    return platform
 
 
 def generate_platforms(board_roots, soc_roots, arch_roots):

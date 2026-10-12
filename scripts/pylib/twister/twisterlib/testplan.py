@@ -38,7 +38,7 @@ from twisterlib.environment import TwisterEnv
 from twisterlib.error import TwisterRuntimeError
 from twisterlib.hardwaremap import HardwareMap
 from twisterlib.modulevars import expand_zephyr_vars
-from twisterlib.platform import Platform, generate_platforms
+from twisterlib.platform import Platform, create_custom_revision_platform, generate_platforms
 from twisterlib.quarantine import Quarantine
 from twisterlib.sidecars import sidecar_config_schema
 from twisterlib.statuses import TwisterStatus
@@ -1514,6 +1514,58 @@ class TestPlan:
                     results.append(ts)
         return results
 
+    def _register_custom_revision(self, requested):
+        """Add an explicitly requested custom revision to the platform list.
+        Only the board and qualifiers are checked here. CMake remains the
+        authority for revision validation and ACTIVE_BOARD_REVISION mapping.
+        """
+        match = re.fullmatch(r"([^@/]+)@([^@/]+)(?:/([^@]+))?", requested)
+        if not match:
+            return False
+        board_name, revision, qualifier = match.groups()
+        candidates = [
+            p for p in self.platforms
+            if p.board is not None and p.board.hwm == "v2"
+            and p.board.name == board_name and p.board.revision_format == "custom"
+        ]
+        if not candidates:
+            return False
+        board = candidates[0].board
+        if qualifier is None:
+            # Unqualified aliases exist only for single-SoC targets without
+            # a CPU cluster or variant qualifier.
+            candidates = [
+                p for p in candidates if board_name in p.aliases
+                or any(a.startswith(f"{board_name}@") and "/" not in a
+                       for a in p.aliases)
+            ]
+        else:
+            candidates = [
+                p for p in candidates if p.name.partition("/")[2] == qualifier
+            ]
+        if not candidates:
+            return False
+        # Prefer the default revision's metadata where several revisions
+        # of the same board and qualifier are already listed in board.yml.
+        candidates.sort(
+            key=lambda p: not p.name.startswith(
+                f"{board_name}@{board.revision_default}/"
+            )
+        )
+        template = candidates[0]
+        qualifier = template.name.partition("/")[2]
+        target = f"{board_name}@{revision}/{qualifier}"
+        aliases = [target]
+        if len(board.socs) == 1 and "/" not in qualifier:
+            aliases.append(f"{board_name}@{revision}")
+        platform = create_custom_revision_platform(template, target, aliases)
+        for name, toolchains in self.test_config.build_toolchains.items():
+            if name in aliases:
+                platform.build_toolchains = toolchains
+        self.platforms.append(platform)
+        self.platform_names.extend(aliases)
+        return True
+
     def verify_platforms_existence(self, platform_names_to_verify, log_info=""):
         """
         Verify if platform name (passed by --platform option, or in yaml file
@@ -1522,6 +1574,9 @@ class TestPlan:
         """
         _platforms = []
         for platform in platform_names_to_verify:
+            if platform not in self.platform_names:
+                self._register_custom_revision(platform)
+
             if platform in self.platform_names:
                 p = self.get_platform(platform)
                 if p:
